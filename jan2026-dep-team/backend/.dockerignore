@@ -1,0 +1,29 @@
+# Dependencies & build output
+node_modules
+dist
+
+# Environment files (secrets must never be in the image)
+.env
+.env.*
+!.env.example
+
+# Seed / scripts not needed at runtime
+scripts
+
+# Logs
+*.log
+npm-debug.log*
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Config files not needed at runtime
+README.md

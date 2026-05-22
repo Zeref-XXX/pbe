@@ -1,0 +1,338 @@
+pipeline {
+    agent { label 'in-node1-linux' }
+
+    environment {
+        AWS_REGION              = 'ap-south-1'
+        ECR_REGISTRY            = '169984788524.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_REPO_FRONTEND       = '169984788524.dkr.ecr.ap-south-1.amazonaws.com/ekart-hyd-team1/frontend'
+        ECR_REPO_BACKEND        = '169984788524.dkr.ecr.ap-south-1.amazonaws.com/ekart-hyd-team1/backend'
+        INSTANCE_ID             = 'i-098bda15550c8e3cb'
+        APP_NAME_FRONTEND       = 'ekart-hyd-team1-frontend'
+        APP_NAME_BACKEND        = 'ekart-hyd-team1-backend'
+        FRONTEND_PORT           = '3000'
+        BACKEND_PORT            = '5000'
+        DOCKER_NETWORK          = 'ekart-team1-network'
+    }
+
+    stages {
+
+        // ─────────────────────────────────────────────
+        // Stage 1: Checkout
+        // ─────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                checkout scm
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 2: Install Dependencies
+        // ─────────────────────────────────────────────
+        stage('Install') {
+            steps {
+                sh '''#!/bin/bash
+                    export NVM_DIR="$HOME/.nvm"
+                    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                    nvm install 22
+                    npm install
+                '''
+                dir('backend') {
+                    sh '''#!/bin/bash
+                        export NVM_DIR="$HOME/.nvm"
+                        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                        nvm install 22
+                        npm install
+                    '''
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 3: Build
+        // ─────────────────────────────────────────────
+        stage('Build') {
+            steps {
+                sh '''#!/bin/bash
+                    export NVM_DIR="$HOME/.nvm"
+                    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                    nvm install 22
+                    CI=false npm run build
+                '''
+                dir('backend') {
+                    sh '''#!/bin/bash
+                        export NVM_DIR="$HOME/.nvm"
+                        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                        nvm install 22
+                        npm run build
+                    '''
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 4: Unit Tests (Coverage)
+        // ─────────────────────────────────────────────
+        stage('Unit Tests (Coverage)') {
+            steps {
+                sh '''#!/bin/bash
+                    export NVM_DIR="$HOME/.nvm"
+                    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                    nvm install 22
+                    npm test
+                '''
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 5: SonarQube Analysis
+        // ─────────────────────────────────────────────
+        stage('SonarQube Analysis') {
+            steps {
+                withCredentials([string(credentialsId: 'AbhiSonar', variable: 'SONAR_TOKEN')]) {
+                    sh '''#!/bin/bash
+                        export NVM_DIR="$HOME/.nvm"
+                        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                        nvm install 22
+                        npm install sonar-scanner --no-save
+                        npx sonar-scanner \
+                          -Dsonar.projectKey=EPM-ICMP-JAN-2026-DEP-TEAM1 \
+                          -Dsonar.projectName=EPM-ICMP-JAN-2026-DEP-TEAM1 \
+                          -Dsonar.sources=src \
+                          -Dsonar.language=ts \
+                          -Dsonar.sourceEncoding=UTF-8 \
+                          -Dsonar.typescript.tsconfigPath=tsconfig.json \
+                          -Dsonar.host.url=https://sonarhyd.epam.com/sonarqube \
+                          -Dsonar.login=$SONAR_TOKEN \
+                          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+                    '''
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 6: Docker Build (runs only on 'deployment' branch)
+        // ─────────────────────────────────────────────
+        stage('Docker Build') {
+            when { branch 'demo' }
+            parallel {
+                stage('Docker Build - Backend') {
+                    steps {
+                        sh "docker build -t ${ECR_REPO_BACKEND}:${BUILD_NUMBER} -t ${ECR_REPO_BACKEND}:latest -f backend/Dockerfile backend"
+                    }
+                }
+                stage('Docker Build - Frontend') {
+                    steps {
+                        withCredentials([
+                            string(credentialsId: 'VITE_API_BASE_URL', variable: 'VITE_API_BASE_URL')
+                        ]) {
+                            sh "docker build --build-arg VITE_API_BASE_URL=\$VITE_API_BASE_URL -t ${ECR_REPO_FRONTEND}:${BUILD_NUMBER} -t ${ECR_REPO_FRONTEND}:latest -f Dockerfile ."
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 7: Push to ECR (runs only on 'deployment' branch)
+        // ─────────────────────────────────────────────
+        stage('Push to ECR') {
+            when { branch 'demo' }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws_team1',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                ]]) {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} \
+                        | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                        docker push ${ECR_REPO_BACKEND}:${BUILD_NUMBER}
+                        docker push ${ECR_REPO_BACKEND}:latest
+
+                        docker push ${ECR_REPO_FRONTEND}:${BUILD_NUMBER}
+                        docker push ${ECR_REPO_FRONTEND}:latest
+                    """
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // Stage 8: Deploy to EC2 via SSM (runs only on 'demo' branch)
+        // ─────────────────────────────────────────────
+        stage('Deploy to EC2') {
+            when { branch 'demo' }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws_team1',
+                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                ]]) {
+                    sh """
+                        set -e
+
+                        echo "======================================"
+                        echo "Opening Security Group ports 3000 & 5000"
+                        echo "======================================"
+
+                        SG_ID=\$(aws ec2 describe-instances \
+                            --region ${AWS_REGION} \
+                            --instance-ids ${INSTANCE_ID} \
+                            --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+                            --output text)
+
+                        echo "Security Group ID: \$SG_ID"
+
+                        aws ec2 authorize-security-group-ingress \
+                            --region ${AWS_REGION} \
+                            --group-id \$SG_ID \
+                            --protocol tcp --port ${FRONTEND_PORT} --cidr 0.0.0.0/0 2>/dev/null || echo "Port ${FRONTEND_PORT} rule already exists, skipping."
+
+                        aws ec2 authorize-security-group-ingress \
+                            --region ${AWS_REGION} \
+                            --group-id \$SG_ID \
+                            --protocol tcp --port ${BACKEND_PORT} --cidr 0.0.0.0/0 2>/dev/null || echo "Port ${BACKEND_PORT} rule already exists, skipping."
+
+                        echo "======================================"
+                        echo "Starting Deploy to EC2"
+                        echo "Frontend: ${ECR_REPO_FRONTEND}:latest"
+                        echo "Backend:  ${ECR_REPO_BACKEND}:latest"
+                        echo "Instance: ${INSTANCE_ID}"
+                        echo "======================================"
+
+                        # Build the remote deploy script (runs as one shell on EC2 so failures and output are captured together)
+                        cat > deploy-remote.sh <<'EOF'
+#!/bin/bash
+set -eo pipefail
+echo "[remote] whoami=\$(whoami)"
+echo "[remote] docker version:"
+docker version || { echo "[remote] docker not installed or not running"; exit 10; }
+
+echo "[remote] ECR login..."
+aws ecr get-login-password --region __AWS_REGION__ | docker login --username AWS --password-stdin __ECR_REGISTRY__
+
+echo "[remote] Pull images..."
+docker pull __ECR_REPO_FRONTEND__:latest
+docker pull __ECR_REPO_BACKEND__:latest
+
+echo "[remote] Ensure network..."
+docker network inspect __DOCKER_NETWORK__ >/dev/null 2>&1 || docker network create __DOCKER_NETWORK__
+
+echo "[remote] Restart backend..."
+docker stop __APP_NAME_BACKEND__ 2>/dev/null || true
+docker rm   __APP_NAME_BACKEND__ 2>/dev/null || true
+if [ ! -f /home/ubuntu/.env.backend ]; then
+  echo "[remote] WARNING: /home/ubuntu/.env.backend missing"
+fi
+docker run -d --name __APP_NAME_BACKEND__ --network __DOCKER_NETWORK__ \\
+  -p __BACKEND_PORT__:5000 --env-file /home/ubuntu/.env.backend \\
+  __ECR_REPO_BACKEND__:latest
+
+echo "[remote] Restart frontend..."
+docker stop __APP_NAME_FRONTEND__ 2>/dev/null || true
+docker rm   __APP_NAME_FRONTEND__ 2>/dev/null || true
+docker run -d --name __APP_NAME_FRONTEND__ --network __DOCKER_NETWORK__ \\
+  -p __FRONTEND_PORT__:3000 \\
+  __ECR_REPO_FRONTEND__:latest
+
+echo "[remote] Running containers:"
+docker ps --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'
+
+echo "[remote] Pruning unused images to keep disk healthy..."
+docker image prune -af
+echo "[remote] Disk usage after prune:"
+df -h /
+EOF
+
+                        # Substitute Jenkins env into the remote script
+                        sed -i \\
+                          -e "s|__AWS_REGION__|${AWS_REGION}|g" \\
+                          -e "s|__ECR_REGISTRY__|${ECR_REGISTRY}|g" \\
+                          -e "s|__ECR_REPO_FRONTEND__|${ECR_REPO_FRONTEND}|g" \\
+                          -e "s|__ECR_REPO_BACKEND__|${ECR_REPO_BACKEND}|g" \\
+                          -e "s|__DOCKER_NETWORK__|${DOCKER_NETWORK}|g" \\
+                          -e "s|__APP_NAME_BACKEND__|${APP_NAME_BACKEND}|g" \\
+                          -e "s|__APP_NAME_FRONTEND__|${APP_NAME_FRONTEND}|g" \\
+                          -e "s|__BACKEND_PORT__|${BACKEND_PORT}|g" \\
+                          -e "s|__FRONTEND_PORT__|${FRONTEND_PORT}|g" \\
+                          deploy-remote.sh
+
+                        # Build SSM parameters JSON safely (avoids shorthand quoting issues).
+                        # AWS-RunShellScript executes commands via /bin/sh (dash on Ubuntu), which does NOT
+                        # support `set -o pipefail` or other bashisms. Base64-encode the script and pipe it
+                        # into bash explicitly so the shebang/bash features actually take effect.
+                        python3 - <<'PY' > ssm-params.json
+import json, base64
+with open('deploy-remote.sh', 'rb') as f:
+    b64 = base64.b64encode(f.read()).decode()
+runner = "echo " + b64 + " | base64 -d | bash"
+print(json.dumps({"commands": [runner], "executionTimeout": ["1800"]}))
+PY
+
+                        echo ">>> Sending SSM command..."
+                        COMMAND_ID=\$(aws ssm send-command \\
+                            --region ${AWS_REGION} \\
+                            --instance-ids ${INSTANCE_ID} \\
+                            --document-name "AWS-RunShellScript" \\
+                            --parameters file://ssm-params.json \\
+                            --output text \\
+                            --query 'Command.CommandId')
+
+                        echo ">>> SSM Command ID: \$COMMAND_ID"
+
+                        aws ssm wait command-executed \\
+                            --command-id \$COMMAND_ID \\
+                            --instance-id ${INSTANCE_ID} \\
+                            --region ${AWS_REGION} || true
+
+                        echo "--- FULL INVOCATION ---"
+                        aws ssm get-command-invocation \\
+                            --command-id \$COMMAND_ID \\
+                            --instance-id ${INSTANCE_ID} \\
+                            --region ${AWS_REGION} \\
+                            --output json || true
+
+                        STATUS=\$(aws ssm get-command-invocation \\
+                            --command-id \$COMMAND_ID \\
+                            --instance-id ${INSTANCE_ID} \\
+                            --region ${AWS_REGION} \\
+                            --query 'Status' --output text)
+
+                        STATUS_DETAILS=\$(aws ssm get-command-invocation \\
+                            --command-id \$COMMAND_ID \\
+                            --instance-id ${INSTANCE_ID} \\
+                            --region ${AWS_REGION} \\
+                            --query 'StatusDetails' --output text)
+
+                        echo ">>> Deployment Status: \$STATUS (\$STATUS_DETAILS)"
+
+                        if [ "\$STATUS" != "Success" ]; then
+                            echo "======================================"
+                            echo "DEPLOYMENT FAILED - see invocation output above"
+                            echo "======================================"
+                            exit 1
+                        fi
+
+                        echo "======================================"
+                        echo "DEPLOYMENT SUCCESSFUL"
+                        echo "Frontend port: ${FRONTEND_PORT}"
+                        echo "Backend port:  ${BACKEND_PORT}"
+                        echo "======================================"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
